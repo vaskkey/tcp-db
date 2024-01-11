@@ -9,18 +9,19 @@ import java.io.IOException;
 import java.net.Socket;
 import java.util.*;
 
-/**---------------------------------------------------------------------------------------------------------------------
- *                                                    Node
+/**
+ * ---------------------------------------------------------------------------------------------------------------------
+ * Node
  * ---------------------------------------------------------------------------------------------------------------------
  * Represents a node in the network
  * Example request string: "get-value 17
  * Available commands:
- * - get-value <key> - returns key:value
- * - set-value <key>:<value> - sets key to value
+ * - get-value <key> - returns key:value from whole network
+ * - set-value <key>:<value> - sets key to value in the network
  * - find-key <key> - returns the node that contains the key address:port
  * - get-max-key - returns the maximum key:value in the network
  * - get-min-key - returns the minimum key:value in the network
- * - new-record <key>:<value> - replaces the current record with a new one
+ * - new-record <key>:<value> - replaces the current record with a new one on this node
  * - terminate - terminates the Node
  */
 public class Node {
@@ -48,6 +49,7 @@ public class Node {
 
     /**
      * Connects to all the nodes in the list
+     *
      * @param connect Node to connect to
      */
     private void connect(ArrayList<NodeInfo> connect) {
@@ -77,7 +79,7 @@ public class Node {
     }
 
     private synchronized void handleMessage(ClientResponse message, TCPClient client) {
-        System.out.printf("Received message from client: %s, %s%n",message.getPort(), message.getMessage());
+        System.out.printf("Received message from client: %s, %s%n", message.getPort(), message.getMessage());
         if (this.clients.containsKey(message.getPort())) {
             this.handleNodeMessage(message.getMessage(), client);
         } else {
@@ -101,14 +103,10 @@ public class Node {
                     this.respond(ID, msg);
                     break;
                 default:
-                    System.out.println(msg);
                     tcpClient.send("ERROR: Invalid arguments");
-                    System.exit(69);
             }
         } catch (Exception e) {
-            e.printStackTrace();
             tcpClient.send("ERROR: Invalid arguments");
-            System.exit(69);
         }
     }
 
@@ -116,36 +114,37 @@ public class Node {
         System.out.printf("Received message from client: %s%n", message.getMessage());
         String[] parts = message.getMessage().split(" ");
         try {
-           switch (parts[0]) {
-               case "HELLO-NODE":
-                   if (!this.clients.containsKey(message.getPort())){
-                    this.clients.put(message.getPort(), client);
-                    System.out.println(this.clients);
-                   }
-                   break;
-               case "get-value":
-                   String ID = this.getRandomID();
-                   this.clientsToRespond.put(ID, client);
-                   this.IDsOriginatedFromThisNode.add(ID);
-                   this.getValue(Integer.parseInt(parts[1]), ID);
-                   break;
-               case "set-value":
-                   client.send(this.setValue(parts[1]));
-                   break;
+            switch (parts[0]) {
+                case "HELLO-NODE":
+                    if (!this.clients.containsKey(message.getPort())) {
+                        this.clients.put(message.getPort(), client);
+                        System.out.println(this.clients);
+                    }
+                    break;
+                case "get-value":
+                    String ID = this.getRandomID();
+                    this.clientsToRespond.put(ID, client);
+                    this.IDsOriginatedFromThisNode.add(ID);
+                    this.getValue(Integer.parseInt(parts[1]), ID);
+                    break;
+                case "new-record":
+                    client.send(this.newRecord(parts[1]));
+                    break;
+                case "set-value":
+                    client.send(this.newRecord(parts[1]));
+                    break;
 //                   case "find-key":
 //                       return this.findKey(Integer.parseInt(parts[++i]));
 //                   case "get-max-key":
 //                       return this.getMaxKey();
 //                   case "get-min-key":
 //                       return this.getMinKey();
-//                   case "new-record":
-//                       return this.newRecord(parts[++i]);
-               case "terminate":
-                   System.out.println("Terminating");
-                   System.exit(0);
-               default:
-                   client.send("ERROR: Invalid arguments");
-           }
+                case "terminate":
+                    System.out.println("Terminating");
+                    System.exit(0);
+                default:
+                    client.send("ERROR: Invalid arguments");
+            }
         } catch (Exception e) {
             client.send("ERROR: Invalid arguments");
         }
@@ -153,7 +152,8 @@ public class Node {
 
     /**
      * return <ID> <key>:<value>
-     * @param ID - ID
+     *
+     * @param ID       - ID
      * @param response - key:value
      * @return ID:key:value
      */
@@ -173,13 +173,14 @@ public class Node {
 
     /**
      * get-value <key>
+     *
      * @param key - key to get
-     * @param ID - ID of request used to cache the response
+     * @param ID  - ID of request used to cache the response
      * @return key:value
      */
     private void getValue(int key, String ID) {
         System.out.printf("Searching for key: %s. ID %s%n", key, ID);
-        if(this.record.has(key)) {
+        if (this.record.has(key)) {
             System.out.printf("Found key: %s%n", key);
             this.respond(ID, this.returnResponse(ID, this.record.toString()));
             return;
@@ -198,16 +199,18 @@ public class Node {
 
     /**
      * set-value <key>:<value>
+     *
      * @param keyValue - key:value to set
      * @return OK response
      */
-    private String setValue(String keyValue) {
+    private String newRecord(String keyValue) {
         this.record.setValue(keyValue);
         return "OK";
     }
 
     /**
      * Generates a random ID
+     *
      * @return Random ID
      */
     private String getRandomID() {
@@ -221,7 +224,8 @@ public class Node {
 
     /**
      * Respond to client with ID
-     * @param ID - ID of request
+     *
+     * @param ID       - ID of request
      * @param response - response to send
      */
     private void respond(String ID, String response) {

@@ -43,4 +43,11 @@ public class TCPServer {
     public String getPort() {
         return String.valueOf(this.port);
     }
+
+    /**
+     * @return Server Data <address>:<port>
+     */
+    public String toString() {
+        return String.format("localhost:%s", this.port);
+    }
 }

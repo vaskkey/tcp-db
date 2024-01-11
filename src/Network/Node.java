@@ -31,6 +31,8 @@ public class Node {
     private final Map<Integer, TCPClient> clients;
     private Map<String, String> responseCache;
     private Map<String, TCPClient> clientsToRespond;
+    private Map<String, TCPClient> requestOrigin;
+    private Map<String, Set<TCPClient>> waitingForResponseFrom;
     private Set<String> IDsOriginatedFromThisNode;
 
 
@@ -41,6 +43,8 @@ public class Node {
         this.clients = new HashMap<>();
         this.clientsToRespond = new HashMap<>();
         this.IDsOriginatedFromThisNode = new HashSet<>();
+        this.requestOrigin = new HashMap<>();
+        this.waitingForResponseFrom = new HashMap<>();
 
         if (arguments.getConnect() != null) {
             this.connect(arguments.getConnect());
@@ -89,30 +93,76 @@ public class Node {
 
     private synchronized void handleNodeMessage(String message, TCPClient tcpClient) {
         System.out.printf("Received message from node: %s%n", message);
+        if (message == null) {
+            System.out.println("Node disconnected");
+            this.clients.remove(tcpClient.getPort());
+            tcpClient.close();
+            return;
+        }
+
         String[] parts = message.split(" ");
         String verb = parts[0];
         String ID = parts[1];
-        String msg = parts[2];
+        // rest of the message
+        String msg = message.substring(verb.length() + ID.length() + 2);
+
+        if (this.responseCache.containsKey(ID)) {
+            System.out.printf("Found key: %s in cache%n", this.responseCache.get(ID));
+            this.respond(ID, this.returnResponse(ID, this.responseCache.get(ID)));
+            return;
+        }
+
+        if (!this.IDsOriginatedFromThisNode.contains(ID) && !this.requestOrigin.containsKey(ID)) {
+            this.requestOrigin.put(ID, tcpClient);
+        }
+
+        this.markAsResponded(ID, message, tcpClient);
         try {
             switch (verb) {
                 case "GET":
                     this.clientsToRespond.put(ID, tcpClient);
                     this.getValue(Integer.parseInt(msg), ID);
                     break;
+                case "SET":
+                    this.clientsToRespond.put(ID, tcpClient);
+                    this.setValue(msg, ID);
+                    break;
+                case "FIND":
+                    this.clientsToRespond.put(ID, tcpClient);
+                    this.findKey(Integer.parseInt(msg), ID);
+                    break;
                 case "RETURN":
+                    this.waitingForResponseFrom.get(ID).clear();
+                    this.respond(ID, msg);
+                    break;
+                case "ERROR":
+                    if (!this.waitingForResponseFrom.get(ID).isEmpty()) return;
                     this.respond(ID, msg);
                     break;
                 default:
-                    tcpClient.send("ERROR: Invalid arguments");
+                    System.out.println(message);
+                    tcpClient.send("ERROR Invalid arguments");
+                    System.exit(69);
             }
         } catch (Exception e) {
-            tcpClient.send("ERROR: Invalid arguments");
+            e.printStackTrace();
+            tcpClient.send("ERROR Invalid arguments");
+            System.exit(420);
         }
     }
 
     private synchronized void handleClientMessage(ClientResponse message, TCPClient client) {
         System.out.printf("Received message from client: %s%n", message.getMessage());
+
+        if (message.getMessage() == null) {
+            System.out.println("Client disconnected");
+            client.close();
+            this.clients.remove(message.getPort());
+            return;
+        }
+
         String[] parts = message.getMessage().split(" ");
+        String ID;
         try {
             switch (parts[0]) {
                 case "HELLO-NODE":
@@ -122,19 +172,21 @@ public class Node {
                     }
                     break;
                 case "get-value":
-                    String ID = this.getRandomID();
-                    this.clientsToRespond.put(ID, client);
-                    this.IDsOriginatedFromThisNode.add(ID);
+                    ID = this.getRootID(client);
                     this.getValue(Integer.parseInt(parts[1]), ID);
                     break;
                 case "new-record":
                     client.send(this.newRecord(parts[1]));
                     break;
                 case "set-value":
-                    client.send(this.newRecord(parts[1]));
+                    ID = this.getRootID(client);
+
+                    this.setValue(parts[1], ID);
                     break;
-//                   case "find-key":
-//                       return this.findKey(Integer.parseInt(parts[++i]));
+                   case "find-key":
+                       ID = this.getRootID(client);
+                       this.findKey(Integer.parseInt(parts[1]), ID);
+                       break;
 //                   case "get-max-key":
 //                       return this.getMaxKey();
 //                   case "get-min-key":
@@ -143,11 +195,18 @@ public class Node {
                     System.out.println("Terminating");
                     System.exit(0);
                 default:
-                    client.send("ERROR: Invalid arguments");
+                    client.send("ERROR Invalid arguments");
             }
         } catch (Exception e) {
-            client.send("ERROR: Invalid arguments");
+            client.send("ERROR Invalid arguments");
         }
+    }
+
+    private String getRootID(TCPClient client) {
+        String ID = this.getRandomID();
+        this.clientsToRespond.put(ID, client);
+        this.IDsOriginatedFromThisNode.add(ID);
+        return ID;
     }
 
     /**
@@ -172,11 +231,47 @@ public class Node {
     }
 
     /**
+     * find-key <key>
+     * @param key - key to find
+     * @param ID - ID of request used to cache the response
+     */
+    private void findKey(int key, String ID) {
+        System.out.printf("Searching for key: %s%n", key);
+        if (this.record.has(key)) {
+            System.out.printf("Found key: %s%n", key);
+            this.respond(ID, this.returnResponse(ID, this.server.toString()));
+            return;
+        }
+
+        this.poll(ID, "FIND", String.valueOf(key));
+    }
+
+    /**
+     * set-value <key>:<value>
+     *
+     * @param part - key:value
+     * @param ID   - ID of request used to cache the response
+     */
+    private void setValue(String part, String ID) {
+        String[] parts = part.split(":");
+        int key = Integer.parseInt(parts[0]);
+        int value = Integer.parseInt(parts[1]);
+        System.out.printf("Setting key: %d to value %d. ID %s%n", key, value, ID);
+
+        if (this.record.has(key)) {
+            this.record.setValue(part);
+            this.respond(ID, this.returnResponse(ID, "OK"));
+            return;
+        }
+
+        this.poll(ID, "SET", part);
+    }
+
+    /**
      * get-value <key>
      *
      * @param key - key to get
      * @param ID  - ID of request used to cache the response
-     * @return key:value
      */
     private void getValue(int key, String ID) {
         System.out.printf("Searching for key: %s. ID %s%n", key, ID);
@@ -186,15 +281,7 @@ public class Node {
             return;
         }
 
-        if (this.responseCache.containsKey(ID)) {
-            System.out.printf("Found key: %s in cache%n", key);
-            this.respond(ID, this.returnResponse(ID, this.responseCache.get(ID)));
-            return;
-        }
-
-        for (TCPClient client : this.clients.values()) {
-            client.send(String.format("GET %s %s", ID, key));
-        }
+        this.poll(ID, "GET", String.valueOf(key));
     }
 
     /**
@@ -230,8 +317,62 @@ public class Node {
      */
     private void respond(String ID, String response) {
         System.out.printf("Responding to client with ID: %s%n", ID);
-        this.clientsToRespond.get(ID).send(response);
+        TCPClient client = this.clientsToRespond.get(ID);
+
+        if (client == null) return;
+
+        client.send(response);
         this.responseCache.put(ID, response);
+
+        if (!response.contains(ID)) {
+            client.close();
+        }
+
         this.clientsToRespond.remove(ID);
+    }
+
+    /**
+     * Polls the clients for a response
+     *
+     * @param ID      - ID of request
+     * @param verb    - verb of request
+     * @param message - message of request
+     */
+    private void poll(String ID, String verb, String message) {
+        System.out.printf("Polling for response with ID: %s%n", ID);
+        if (!this.waitingForResponseFrom.containsKey(ID)) {
+            this.waitingForResponseFrom.put(ID, new HashSet<>());
+        }
+
+        for (TCPClient client : this.clients.values()) {
+            if (this.waitingForResponseFrom.get(ID).contains(client)) continue;
+            if (this.requestOrigin.get(ID) == client) continue;
+
+            client.send(String.format("%s %s %s", verb, ID, message));
+            this.waitingForResponseFrom.get(ID).add(client);
+        }
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, String.format("ERROR %s ERROR: Not found", ID));
+        }
+    }
+
+    /**
+     * Marks the client as responded
+     *
+     * @param ID      - ID of request
+     * @param message - message of request
+     * @param client  - client that responded
+     */
+    private void markAsResponded(String ID, String message, TCPClient client) {
+        if (!this.waitingForResponseFrom.containsKey(ID)) return;
+
+        System.out.printf("Marking client as responded with ID: %s%n", ID);
+
+        if (!this.responseCache.containsKey(ID) || !message.startsWith("ERROR")) {
+            this.responseCache.put(ID, message);
+        }
+
+        this.waitingForResponseFrom.get(ID).remove(client);
     }
 }

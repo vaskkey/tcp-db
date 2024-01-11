@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.net.SocketException;
 
 public class TCPClient implements Runnable {
     public interface MessageHandler {
@@ -27,7 +28,14 @@ public class TCPClient implements Runnable {
 
     public void receive() {
         while (true) {
-            this.handler.handle(this.readLine(), this);
+            try {
+                this.handler.handle(this.readLine(), this);
+            } catch (SocketException e) {
+                break;
+            } catch (Exception e) {
+                e.printStackTrace();
+                break;
+            }
         }
     }
 
@@ -49,10 +57,12 @@ public class TCPClient implements Runnable {
     /**
      * Reads messages from the client
      */
-    public ClientResponse readLine() {
+    public ClientResponse readLine() throws SocketException {
         try {
             BufferedReader in = new BufferedReader(new InputStreamReader(this.clientSocket.getInputStream()));
             return new ClientResponse(in.readLine(), this.getPort());
+        } catch (SocketException e) {
+            throw e;
         } catch (IOException e) {
             e.printStackTrace();
         }

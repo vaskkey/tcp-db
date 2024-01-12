@@ -30,10 +30,11 @@ public class Node {
 
     private final Map<Integer, TCPClient> clients;
     private Map<String, String> responseCache;
-    private Map<String, TCPClient> clientsToRespond;
     private Map<String, TCPClient> requestOrigin;
+    private Map<String, Set<TCPClient>> clientsToRespond;
     private Map<String, Set<TCPClient>> waitingForResponseFrom;
     private Set<String> IDsOriginatedFromThisNode;
+    private Map<String, Integer> minMaxCache;
 
 
     public Node(Arguments arguments) {
@@ -45,6 +46,7 @@ public class Node {
         this.IDsOriginatedFromThisNode = new HashSet<>();
         this.requestOrigin = new HashMap<>();
         this.waitingForResponseFrom = new HashMap<>();
+        this.minMaxCache = new HashMap<>();
 
         if (arguments.getConnect() != null) {
             this.connect(arguments.getConnect());
@@ -106,7 +108,7 @@ public class Node {
         // rest of the message
         String msg = message.substring(verb.length() + ID.length() + 2);
 
-        if (this.responseCache.containsKey(ID)) {
+        if (this.responseCache.containsKey(ID) && !verb.startsWith("RETURN")) {
             System.out.printf("Found key: %s in cache%n", this.responseCache.get(ID));
             this.respond(ID, this.returnResponse(ID, this.responseCache.get(ID)));
             return;
@@ -116,39 +118,65 @@ public class Node {
             this.requestOrigin.put(ID, tcpClient);
         }
 
-        this.markAsResponded(ID, message, tcpClient);
+        this.markAsResponded(ID, verb, msg, tcpClient);
         try {
             switch (verb) {
                 case "GET":
-                    this.clientsToRespond.put(ID, tcpClient);
+                    this.addClientToRespond(ID, tcpClient);
                     this.getValue(Integer.parseInt(msg), ID);
                     break;
+                case "GET-MAX":
+                    this.handleMinMax(ID, tcpClient, "MAX");
+                    break;
+                case "GET-MIN":
+                    this.handleMinMax(ID, tcpClient, "MIN");
+                    break;
                 case "SET":
-                    this.clientsToRespond.put(ID, tcpClient);
+                    this.addClientToRespond(ID, tcpClient);
                     this.setValue(msg, ID);
                     break;
                 case "FIND":
-                    this.clientsToRespond.put(ID, tcpClient);
+                    this.addClientToRespond(ID, tcpClient);
                     this.findKey(Integer.parseInt(msg), ID);
                     break;
                 case "RETURN":
                     this.waitingForResponseFrom.get(ID).clear();
-                    this.respond(ID, msg);
+                    this.respond(ID, this.returnResponse(ID, msg));
+                    break;
+                case "RETURN-MAX":
+                    this.handleMax(ID, msg);
+                    break;
+                case "RETURN-MIN":
+                    this.handleMin(ID, msg);
                     break;
                 case "ERROR":
-                    if (!this.waitingForResponseFrom.get(ID).isEmpty()) return;
-                    this.respond(ID, msg);
+                    if (this.waitingForResponseFrom.containsKey(ID) && !this.waitingForResponseFrom.get(ID).isEmpty()) return;
+                    this.respond(ID, this.returnResponse(ID, msg, "ERROR"));
                     break;
                 default:
-                    System.out.println(message);
                     tcpClient.send("ERROR Invalid arguments");
-                    System.exit(69);
             }
         } catch (Exception e) {
-            e.printStackTrace();
             tcpClient.send("ERROR Invalid arguments");
-            System.exit(420);
         }
+    }
+
+    private void addClientToRespond(String id, TCPClient tcpClient) {
+        if (!this.clientsToRespond.containsKey(id)) {
+            this.clientsToRespond.put(id, new HashSet<>());
+        }
+
+        this.clientsToRespond.get(id).add(tcpClient);
+    }
+
+    private void handleMinMax(String ID, TCPClient tcpClient, String type) {
+        String returnMsg = String.format("RETURN-%s", type);
+        if (this.IDsOriginatedFromThisNode.contains(ID)) {
+            tcpClient.send(this.returnResponse(ID, String.valueOf(this.record.getValue()), returnMsg));
+        }
+
+        this.addClientToRespond(ID, tcpClient);
+        this.getMinMax(ID, type);
     }
 
     private synchronized void handleClientMessage(ClientResponse message, TCPClient client) {
@@ -177,34 +205,94 @@ public class Node {
                     break;
                 case "new-record":
                     client.send(this.newRecord(parts[1]));
+                    client.close();
                     break;
                 case "set-value":
                     ID = this.getRootID(client);
-
                     this.setValue(parts[1], ID);
                     break;
-                   case "find-key":
-                       ID = this.getRootID(client);
-                       this.findKey(Integer.parseInt(parts[1]), ID);
-                       break;
-//                   case "get-max-key":
-//                       return this.getMaxKey();
-//                   case "get-min-key":
-//                       return this.getMinKey();
+                case "find-key":
+                    ID = this.getRootID(client);
+                    this.findKey(Integer.parseInt(parts[1]), ID);
+                    break;
+                case "get-max":
+                    ID = this.getRootID(client);
+                    this.getMinMax(ID, "MAX");
+                    break;
+               case "get-min":
+                   ID = this.getRootID(client);
+                   this.getMinMax(ID, "MIN");
+                   break;
                 case "terminate":
                     System.out.println("Terminating");
                     System.exit(0);
                 default:
                     client.send("ERROR Invalid arguments");
+                    client.close();
             }
         } catch (Exception e) {
             client.send("ERROR Invalid arguments");
+            client.close();
+        }
+    }
+
+    /**
+     * @param ID  - ID of request
+     * @param msg - node max value
+     */
+    private void handleMax(String ID, String msg) {
+        System.out.printf("Received max value from node: %s%n", msg);
+        int max = Integer.parseInt(msg);
+        if (this.minMaxCache.get(ID) < max) {
+            this.minMaxCache.put(ID, max);
+        }
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, this.returnResponse(ID, String.valueOf(this.minMaxCache.get(ID)), "RETURN-MAX"));
+        }
+    }
+
+    /**
+     * @param ID  - ID of request
+     * @param msg - node max value
+     */
+    private void handleMin(String ID, String msg) {
+        System.out.printf("Received min value from node: %s%n", msg);
+        int min = Integer.parseInt(msg);
+        if (this.minMaxCache.get(ID) > min) {
+            this.minMaxCache.put(ID, min);
+        }
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, this.returnResponse(ID, String.valueOf(this.minMaxCache.get(ID)), "RETURN-MIN"));
+        }
+    }
+
+    /**
+     * get-max-key - returns the maximum value in the network
+     * get-min-key - returns the minimum value in the network
+     *
+     * @param ID - ID of request used to cache the response
+     */
+    private void getMinMax(String ID, String type) {
+        System.out.printf("Searching for %s key. ID %s%n", type, ID);
+        if (!this.minMaxCache.containsKey(ID)) {
+            this.minMaxCache.put(ID, this.record.getValue());
+        }
+
+        this.poll(ID, String.format("GET-%s", type), "");
+
+        String returnMsg = String.format("RETURN-%s", type);
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, this.returnResponse(ID, String.valueOf(this.minMaxCache.get(ID)), returnMsg));
         }
     }
 
     private String getRootID(TCPClient client) {
         String ID = this.getRandomID();
-        this.clientsToRespond.put(ID, client);
+        this.addClientToRespond(ID, client);
+
         this.IDsOriginatedFromThisNode.add(ID);
         return ID;
     }
@@ -217,23 +305,27 @@ public class Node {
      * @return ID:key:value
      */
     private String returnResponse(String ID, String response) {
+        return this.returnResponse(ID, response, "RETURN");
+    }
+
+    private String returnResponse(String ID, String response, String verb) {
         System.out.printf("Returning response for ID: %s%n", ID);
         String result;
 
         if (this.IDsOriginatedFromThisNode.contains(ID)) {
             result = response;
         } else {
-            result = String.format("RETURN %s %s", ID, response);
+            result = String.format("%s %s %s", verb, ID, response);
         }
 
-        this.responseCache.put(ID, response);
         return result;
     }
 
     /**
      * find-key <key>
+     *
      * @param key - key to find
-     * @param ID - ID of request used to cache the response
+     * @param ID  - ID of request used to cache the response
      */
     private void findKey(int key, String ID) {
         System.out.printf("Searching for key: %s%n", key);
@@ -244,6 +336,10 @@ public class Node {
         }
 
         this.poll(ID, "FIND", String.valueOf(key));
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, this.returnResponse(ID, "ERROR: Not found", "ERROR"));
+        }
     }
 
     /**
@@ -265,6 +361,10 @@ public class Node {
         }
 
         this.poll(ID, "SET", part);
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, this.returnResponse(ID, "ERROR: Not found", "ERROR"));
+        }
     }
 
     /**
@@ -282,6 +382,10 @@ public class Node {
         }
 
         this.poll(ID, "GET", String.valueOf(key));
+
+        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
+            this.respond(ID, this.returnResponse(ID, "ERROR: Not found", "ERROR"));
+        }
     }
 
     /**
@@ -316,19 +420,21 @@ public class Node {
      * @param response - response to send
      */
     private void respond(String ID, String response) {
-        System.out.printf("Responding to client with ID: %s%n", ID);
-        TCPClient client = this.clientsToRespond.get(ID);
+        System.out.printf("Responding to client with ID: %s; With message: %s%n", ID, response);
 
-        if (client == null) return;
-
-        client.send(response);
-        this.responseCache.put(ID, response);
-
-        if (!response.contains(ID)) {
-            client.close();
+        if (!this.clientsToRespond.containsKey(ID)) {
+            System.out.printf("Clients with ID: %s not found%n", ID);
+            return;
         }
 
-        this.clientsToRespond.remove(ID);
+        for (TCPClient client : this.clientsToRespond.get(ID)) {
+            client.send(response);
+            if (!response.contains(ID)) {
+                client.close();
+            }
+
+            this.clientsToRespond.remove(ID);
+        }
     }
 
     /**
@@ -345,15 +451,14 @@ public class Node {
         }
 
         for (TCPClient client : this.clients.values()) {
+            if (this.clientsToRespond.containsKey(ID) && this.clientsToRespond.get(ID).contains(client)) continue;
             if (this.waitingForResponseFrom.get(ID).contains(client)) continue;
             if (this.requestOrigin.get(ID) == client) continue;
 
+            System.out.printf("Polling client: %s%n", client.getPort());
+
             client.send(String.format("%s %s %s", verb, ID, message));
             this.waitingForResponseFrom.get(ID).add(client);
-        }
-
-        if (this.waitingForResponseFrom.get(ID).isEmpty()) {
-            this.respond(ID, String.format("ERROR %s ERROR: Not found", ID));
         }
     }
 
@@ -361,16 +466,17 @@ public class Node {
      * Marks the client as responded
      *
      * @param ID      - ID of request
-     * @param message - message of request
+     * @param verb - verb of request
+     * @param msg - message of request
      * @param client  - client that responded
      */
-    private void markAsResponded(String ID, String message, TCPClient client) {
+    private void markAsResponded(String ID, String verb, String msg, TCPClient client) {
         if (!this.waitingForResponseFrom.containsKey(ID)) return;
 
         System.out.printf("Marking client as responded with ID: %s%n", ID);
 
-        if (!this.responseCache.containsKey(ID) || !message.startsWith("ERROR")) {
-            this.responseCache.put(ID, message);
+        if (verb.startsWith("RETURN") || (!this.responseCache.containsKey(ID) && verb.startsWith("ERROR"))) {
+            this.responseCache.put(ID, msg);
         }
 
         this.waitingForResponseFrom.get(ID).remove(client);
